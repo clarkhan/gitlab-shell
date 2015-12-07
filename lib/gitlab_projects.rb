@@ -21,11 +21,19 @@ class GitlabProjects
 
   def self.create_hooks(path)
     local_hooks_directory = File.join(path, 'hooks')
+    real_local_hooks_directory = :not_found
+    begin
+      real_local_hooks_directory = File.realpath(local_hooks_directory)
+    rescue Errno::ENOENT
+      # real_local_hooks_directory == :not_found
+    end
 
-    if File.realpath(local_hooks_directory) != File.realpath(GLOBAL_HOOKS_DIRECTORY)
-      $logger.info "Moving existing hooks directory and symlinking global hooks directory for #{path}."
-      FileUtils.mv(local_hooks_directory, "#{local_hooks_directory}.old.#{Time.now.to_i}")
-      FileUtils.ln_s(GLOBAL_HOOKS_DIRECTORY, local_hooks_directory)
+    if real_local_hooks_directory != File.realpath(GLOBAL_HOOKS_DIRECTORY)
+      if File.exist?(local_hooks_directory)
+        $logger.info "Moving existing hooks directory and symlinking global hooks directory for #{path}."
+        FileUtils.mv(local_hooks_directory, "#{local_hooks_directory}.old.#{Time.now.to_i}")
+      end
+      FileUtils.ln_sf(GLOBAL_HOOKS_DIRECTORY, local_hooks_directory)
     else
       $logger.info "Hooks already exist for #{path}."
       true
@@ -51,6 +59,7 @@ class GitlabProjects
     when 'mv-project';  mv_project
     when 'import-project'; import_project
     when 'fork-project'; fork_project
+    when 'fetch-remote'; fetch_remote
     when 'update-head';  update_head
     else
       $logger.warn "Attempt to execute invalid gitlab-projects command #{@command.inspect}."
@@ -120,6 +129,30 @@ class GitlabProjects
     url
   end
 
+  def fetch_remote
+    @name = ARGV.shift
+
+    # timeout for fetch
+    timeout = (ARGV.shift || 120).to_i
+    $logger.info "Fetching remote #{@name} for project #{@project_name}."
+    cmd = %W(git --git-dir=#{full_path} fetch #{@name} --tags)
+    pid = Process.spawn(*cmd)
+
+    begin
+      Timeout.timeout(timeout) do
+        Process.wait(pid)
+      end
+
+      $?.exitstatus.zero?
+    rescue Timeout::Error
+      $logger.error "Fetching remote #{@name} for project #{@project_name} failed due to timeout."
+
+      Process.kill('KILL', pid)
+      Process.wait
+      false
+    end
+  end
+
   def remove_origin_in_repo
     cmd = %W(git --git-dir=#{full_path} remote rm origin)
     pid = Process.spawn(*cmd)
@@ -146,19 +179,23 @@ class GitlabProjects
       Timeout.timeout(timeout) do
         Process.wait(pid)
       end
+
+      return false unless $?.exitstatus.zero?
     rescue Timeout::Error
       $logger.error "Importing project #{@project_name} from <#{masked_source}> failed due to timeout."
 
       Process.kill('KILL', pid)
       Process.wait
       FileUtils.rm_rf(full_path)
-      false
-    else
-      self.class.create_hooks(full_path)
-      # The project was imported successfully.
-      # Remove the origin URL since it may contain password.
-      remove_origin_in_repo
+      return false
     end
+
+    self.class.create_hooks(full_path)
+    # The project was imported successfully.
+    # Remove the origin URL since it may contain password.
+    remove_origin_in_repo
+
+    true
   end
 
   # Move repository from one directory to another

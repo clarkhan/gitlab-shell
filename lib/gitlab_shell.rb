@@ -67,7 +67,7 @@ class GitlabShell
       @repo_name = escape_path(args[2].sub(/\A\/~\//, ''))
 
       # Make sure repository has git-annex enabled
-      init_git_annex(@repo_name)
+      init_git_annex(@repo_name) unless gcryptsetup?(args)
     when 'git-lfs-authenticate'
       raise DisallowedCommandError unless args.count >= 2
       @repo_name = escape_path(args[1])
@@ -119,7 +119,18 @@ class GitlabShell
 
   # This method is not covered by Rspec because it ends the current Ruby process.
   def exec_cmd(*args)
-    Kernel::exec({ 'PATH' => ENV['PATH'], 'LD_LIBRARY_PATH' => ENV['LD_LIBRARY_PATH'], 'GL_ID' => @key_id }, *args, unsetenv_others: true)
+    env = {
+      'PATH' => ENV['PATH'],
+      'LD_LIBRARY_PATH' => ENV['LD_LIBRARY_PATH'],
+      'LANG' => ENV['LANG'],
+      'GL_ID' => @key_id
+    }
+
+    if @config.git_annex_enabled?
+      env.merge!({ 'GIT_ANNEX_SHELL_LIMITED' => '1' })
+    end
+
+    Kernel::exec(env, *args, unsetenv_others: true)
   end
 
   def api
@@ -163,5 +174,10 @@ class GitlabShell
       system(*cmd, err: '/dev/null', out: '/dev/null')
       $logger.info "Enable git-annex for repository: #{path}."
     end
+  end
+
+  def gcryptsetup?(args)
+    non_dashed = args.reject { |a| a.start_with?('-') }
+    non_dashed[0, 2] == %w{git-annex-shell gcryptsetup}
   end
 end
